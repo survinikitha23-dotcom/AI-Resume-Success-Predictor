@@ -1,0 +1,6 @@
+streamlit
+PyMuPDF
+scikit-learn
+google-genai
+python-dotenv
+websockets<16
