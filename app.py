@@ -20,6 +20,7 @@ GENERIC_JOB_TERMS = {
     "position", "positions", "preferred", "professional", "qualification", "qualifications",
     "requirement", "requirements", "responsibilities", "responsibility", "role", "roles",
     "skill", "skills", "strong", "team", "teams", "work", "working", "year", "years",
+    "basic", "entry", "fresher", "junior", "level", "senior",
 }
 
 
@@ -197,29 +198,197 @@ def generate_local_resume_feedback(resume_text, job_description):
             else missing_terms
         )
         if len(destination) < 12:
-            destination.append(term)
+            destination.append(term.title())
 
     suggestions = []
     if missing_terms:
         suggestions.append(
             "If accurate, include evidence for these job-description keywords: "
             + ", ".join(missing_terms)
-            + "."
+            + "; otherwise, do not claim them."
         )
     if matching_terms:
         suggestions.append(
-            "Strengthen matching keywords with a truthful project, responsibility, "
-            "or result from your experience."
+            "Strengthen the resume bullets that support "
+            + ", ".join(matching_terms[:4])
+            + " with your action, context, and a result you can verify."
         )
     suggestions.append(
-        "Tailor your summary and experience bullets to the role using only "
-        "information that accurately reflects your background."
+        "Prioritize completed projects that demonstrate the matched job requirements; "
+        "state your actual contribution and tools, and do not add projects you did not do."
+    )
+    suggestions.append(
+        "Use exact job-description keywords in your summary or bullets only where "
+        "your resume provides truthful evidence."
+    )
+    suggestions.append(
+        "For relevant experience, revise bullets to show action, context, and a "
+        "verified outcome; do not invent metrics or responsibilities."
     )
 
     return {
         "relevant_skills_found": matching_terms,
         "possibly_missing_skills": missing_terms,
         "improvement_suggestions": suggestions,
+    }
+
+
+def assess_ats_compatibility(resume_text):
+    text = resume_text.strip()
+    words = re.findall(r"\b[\w+#.-]+\b", text)
+    passed = []
+    warnings = []
+
+    if len(text) >= 100 and len(words) >= 15:
+        passed.append("Readable resume text was extracted.")
+    else:
+        warnings.append(
+            "Only a small amount of text was extracted; use a text-based PDF "
+            "and check that all pages are readable."
+        )
+
+    if re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", text, re.IGNORECASE):
+        passed.append("An email address was found.")
+    else:
+        warnings.append("Add a clear professional email address near the top.")
+
+    phone_match = re.search(r"(?<!\d)(?:\+?\d[\d\s().-]{7,}\d)(?!\d)", text)
+    if phone_match and 10 <= len(re.sub(r"\D", "", phone_match.group())) <= 15:
+        passed.append("A phone-number-like contact was found.")
+    else:
+        warnings.append("Add a clearly formatted phone number if you want employers to call.")
+
+    headings = (
+        "experience", "work experience", "education", "skills", "projects",
+        "summary", "certifications",
+    )
+    found_headings = [
+        heading for heading in headings
+        if re.search(r"(?im)^\s*" + re.escape(heading) + r"\s*:?\s*$", text)
+    ]
+    if found_headings:
+        passed.append("Common section heading(s) found: " + ", ".join(found_headings[:4]) + ".")
+    else:
+        warnings.append(
+            "Use clear standard headings such as Experience, Education, and Skills."
+        )
+
+    if len(text.splitlines()) >= 4:
+        passed.append("Extracted text contains line breaks for section separation.")
+    else:
+        warnings.append(
+            "Check the PDF reading order; use a simple layout with clear section "
+            "breaks and avoid relying on complex columns or graphics."
+        )
+
+    return {"passed": passed, "warnings": warnings}
+
+
+def _safe_card_items(items, empty_text="None identified."):
+    if not items:
+        return html.escape(empty_text)
+    return ", ".join(html.escape(item) for item in items)
+
+
+def _safe_card_lines(lines):
+    return "<br>".join(
+        f"<strong>{html.escape(label)}:</strong> {value}"
+        for label, value in lines
+    )
+
+
+def build_feature_card_content(keyword_feedback, feedback, ats_report, feedback_source):
+    matching = list(dict.fromkeys(keyword_feedback["relevant_skills_found"]))
+    missing = list(dict.fromkeys(keyword_feedback["possibly_missing_skills"]))
+    matching_keys = {_skill_key(term) for term in matching}
+    missing = [term for term in missing if _skill_key(term) not in matching_keys]
+    keyword_count = len(matching) + len(missing)
+    if keyword_count:
+        score = round(len(matching) / keyword_count * 100)
+        score_text = (
+            f"{score}% ({len(matching)} of {keyword_count} identified job keywords found)"
+        )
+    else:
+        score_text = "Not enough recognizable job keywords to calculate a score."
+
+    skill_card = _safe_card_lines(
+        [
+            ("Score", html.escape(score_text)),
+            ("Matched skills/keywords", _safe_card_items(matching)),
+            ("Not found in resume text", _safe_card_items(missing)),
+            (
+                "Calculation",
+                "Matched keywords divided by identified job keywords; this is not "
+                "a probability of getting hired.",
+            ),
+        ]
+    )
+
+    if feedback_source == "gemini":
+        source_label = "Gemini suggestions; keyword and ATS checks are local"
+        suggestions = list(feedback["improvement_suggestions"])
+        suggestions.extend(keyword_feedback["improvement_suggestions"])
+        suggestions = list(dict.fromkeys(suggestions))
+    else:
+        source_label = "Local keyword-based feedback (Gemini unavailable)"
+        suggestions = keyword_feedback["improvement_suggestions"]
+    suggestion_html = "<br>".join(html.escape(item) for item in suggestions)
+    if not suggestion_html:
+        suggestion_html = "No additional suggestions were identified."
+    improvement_card = _safe_card_lines(
+        [
+            ("Feedback source", source_label),
+            ("Recommendations", suggestion_html),
+        ]
+    )
+
+    ats_report = ats_report or {"passed": [], "warnings": []}
+    ats_card = _safe_card_lines(
+        [
+            ("Passed", _safe_card_items(ats_report["passed"], "No checks passed.")),
+            ("Warnings / fixes", _safe_card_items(ats_report["warnings"], "No warnings.")),
+            (
+                "Note",
+                "These are basic text checks, not a real ATS simulation or an "
+                "acceptance guarantee.",
+            ),
+        ]
+    )
+
+    next_actions = []
+    if missing:
+        next_actions.append(
+            "Review the gaps and add evidence only for skills or experience you "
+            "actually have."
+        )
+    if matching:
+        next_actions.append(
+            "Prepare a concrete example for "
+            + ", ".join(matching[:3])
+            + " to discuss in an interview."
+        )
+    next_actions.extend(
+        [
+            "Prioritize a completed project that demonstrates a target requirement "
+            "and describe your actual contribution.",
+            "Tailor the resume bullets to the job description using truthful "
+            "keywords and verified outcomes.",
+        ]
+    )
+    readiness_card = _safe_card_lines(
+        [
+            ("Strengths", _safe_card_items(matching)),
+            ("Important gaps", _safe_card_items(missing)),
+            ("Next actions", "<br>".join(html.escape(item) for item in next_actions[:3])),
+            ("Guidance", "This checklist is guidance, not a guarantee of employment."),
+        ]
+    )
+
+    return {
+        "skill_match": skill_card,
+        "improvement_suggestions": improvement_card,
+        "ats_compatibility": ats_card,
+        "job_readiness": readiness_card,
     }
 
 
@@ -305,6 +474,7 @@ Rules:
 - Do not invent qualifications, skills, projects, or experience.
 - A possibly missing skill means only that it was not found in the supplied text; do not imply the person lacks it.
 - Suggestions may recommend clarifying or adding evidence only when it is true; never fabricate achievements or metrics.
+- Make suggestions specific to the resume and job description. Cover relevant missing keywords (clearly conditional on truth), improving experience bullets, and selecting relevant completed projects when applicable.
 - Keep each array concise and relevant. Use empty arrays when appropriate.
 
 RESUME TEXT:
@@ -606,10 +776,20 @@ if "match_error" not in st.session_state:
     st.session_state.match_error = ""
 if "gemini_feedback" not in st.session_state:
     st.session_state.gemini_feedback = None
+if "keyword_feedback" not in st.session_state:
+    st.session_state.keyword_feedback = None
 if "gemini_error" not in st.session_state:
     st.session_state.gemini_error = ""
 if "feedback_source" not in st.session_state:
     st.session_state.feedback_source = ""
+if "ats_report" not in st.session_state:
+    st.session_state.ats_report = None
+if "analysis_complete" not in st.session_state:
+    st.session_state.analysis_complete = False
+if "analysis_resume_text" not in st.session_state:
+    st.session_state.analysis_resume_text = None
+if "analysis_job_description" not in st.session_state:
+    st.session_state.analysis_job_description = None
 
 with input_column:
     with st.container(border=True):
@@ -665,40 +845,55 @@ with input_column:
         )
         analyze_clicked = st.button("Analyze Resume", type="primary", use_container_width=True)
         if analyze_clicked:
+            st.session_state.analysis_resume_text = st.session_state.resume_text
+            st.session_state.analysis_job_description = job_description
             st.session_state.match_result = None
             st.session_state.match_error = ""
             st.session_state.gemini_feedback = None
+            st.session_state.keyword_feedback = None
             st.session_state.gemini_error = ""
             st.session_state.feedback_source = ""
+            st.session_state.ats_report = None
+            st.session_state.analysis_complete = False
             if not st.session_state.resume_text.strip():
                 st.session_state.match_error = "Please upload a readable PDF resume first."
             elif not job_description.strip():
                 st.session_state.match_error = "Please enter a job description to compare with your resume."
             else:
+                st.session_state.analysis_complete = True
+                local_feedback = generate_local_resume_feedback(
+                    st.session_state.resume_text,
+                    job_description,
+                )
+                st.session_state.keyword_feedback = local_feedback
+                st.session_state.gemini_feedback = local_feedback
+                st.session_state.feedback_source = "local"
+                st.session_state.ats_report = assess_ats_compatibility(
+                    st.session_state.resume_text
+                )
                 try:
                     st.session_state.match_result = calculate_resume_match(
                         st.session_state.resume_text,
                         job_description,
                     )
                 except ValueError:
+                    st.session_state.match_result = None
                     st.session_state.match_error = (
-                        "We couldn't compare this text. Please add more readable resume and job description text."
+                        "Text similarity could not be calculated from these terms; "
+                        "keyword feedback and basic checks are still available."
                     )
                 except Exception:
+                    st.session_state.match_result = None
                     st.session_state.match_error = (
-                        "Something went wrong while comparing the text. Please try again."
+                        "Text similarity could not be calculated; keyword feedback "
+                        "and basic checks are still available."
                     )
                 api_key = os.getenv("GEMINI_API_KEY", "").strip()
                 if not api_key:
                     st.session_state.gemini_error = (
                         "Gemini feedback is unavailable. Add GEMINI_API_KEY to your .env file and restart the app."
                     )
-                    st.session_state.gemini_feedback = generate_local_resume_feedback(
-                        st.session_state.resume_text,
-                        job_description,
-                    )
-                    st.session_state.feedback_source = "local"
-                else:
+                elif st.session_state.match_result is not None:
                     try:
                         st.session_state.gemini_feedback = generate_resume_feedback(
                             st.session_state.resume_text,
@@ -711,30 +906,47 @@ with input_column:
                         st.session_state.gemini_error = (
                             "Gemini feedback couldn't be generated right now. Please check your API configuration and try again."
                         )
-                        st.session_state.gemini_feedback = generate_local_resume_feedback(
-                            st.session_state.resume_text,
-                            job_description,
-                        )
-                        st.session_state.feedback_source = "local"
 
 with results_column:
     with st.container(border=True):
         st.markdown('<div class="results-heading">Your Results</div>', unsafe_allow_html=True)
-        if st.session_state.match_result is not None:
-            similarity_percentage, matching_terms = st.session_state.match_result
-            matching_terms_text = (
-                ", ".join(html.escape(term) for term in matching_terms)
-                if matching_terms
-                else "No matching job-description terms were found in the resume text."
+        results_are_current = (
+            st.session_state.analysis_resume_text == st.session_state.resume_text
+            and st.session_state.analysis_job_description == job_description
+        )
+        if st.session_state.analysis_complete and results_are_current:
+            if st.session_state.match_result is not None:
+                similarity_percentage, matching_terms = st.session_state.match_result
+                similarity_text = (
+                    f"<strong>Text similarity (TF-IDF cosine):</strong> "
+                    f"{similarity_percentage}% — weighted word/phrase overlap, "
+                    "not a job-success probability."
+                )
+                matching_terms_text = (
+                    ", ".join(html.escape(term) for term in matching_terms)
+                    if matching_terms
+                    else "No matching job-description terms were found in the resume text."
+                )
+            else:
+                similarity_text = html.escape(
+                    st.session_state.match_error
+                    or "Text similarity could not be calculated."
+                )
+                matching_terms_text = "Keyword results are shown in the Skill Match Score card."
+            feature_card_content = build_feature_card_content(
+                st.session_state.keyword_feedback,
+                st.session_state.gemini_feedback,
+                st.session_state.ats_report,
+                st.session_state.feedback_source,
             )
             result_title = "Resume Feedback"
             result_description = [
-                f"<strong>Text similarity:</strong> {similarity_percentage}%",
+                similarity_text,
                 f"<strong>Matching terms:</strong> {matching_terms_text}",
             ]
             if st.session_state.gemini_feedback:
                 feedback_source = (
-                    "AI-generated by Gemini"
+                    "Gemini-generated suggestions; keyword and ATS checks are local"
                     if st.session_state.feedback_source == "gemini"
                     else "Local keyword-based feedback (Gemini unavailable)"
                 )
@@ -767,7 +979,7 @@ with results_column:
             elif st.session_state.gemini_error:
                 result_description.append(html.escape(st.session_state.gemini_error))
             result_description = "<br><br>".join(result_description)
-        elif st.session_state.match_error:
+        elif results_are_current and st.session_state.match_error:
             result_title = "Unable to compare yet"
             result_description = html.escape(st.session_state.match_error)
         else:
@@ -782,10 +994,10 @@ with results_column:
               <p>{result_description}</p>
             </div>
             <div class="feature-grid">
-              <div class="feature"><div class="feature-icon">◉</div><div><h3>Skill Match Score</h3><p>See how your skills align with the role.</p></div></div>
-              <div class="feature"><div class="feature-icon">✎</div><div><h3>Improvement Suggestions</h3><p>Find opportunities to strengthen your resume.</p></div></div>
-              <div class="feature"><div class="feature-icon">✓</div><div><h3>ATS Compatibility</h3><p>Understand how your resume reads for ATS.</p></div></div>
-              <div class="feature"><div class="feature-icon">↗</div><div><h3>Be Job Ready</h3><p>Get ready to take the next step in your search.</p></div></div>
+              <div class="feature"><div class="feature-icon">◉</div><div><h3>Skill Match Score</h3><p>{feature_card_content["skill_match"] if st.session_state.analysis_complete and results_are_current else "See how your skills align with the role."}</p></div></div>
+              <div class="feature"><div class="feature-icon">✎</div><div><h3>Improvement Suggestions</h3><p>{feature_card_content["improvement_suggestions"] if st.session_state.analysis_complete and results_are_current else "Find opportunities to strengthen your resume."}</p></div></div>
+              <div class="feature"><div class="feature-icon">✓</div><div><h3>ATS Compatibility</h3><p>{feature_card_content["ats_compatibility"] if st.session_state.analysis_complete and results_are_current else "Understand how your resume reads for ATS."}</p></div></div>
+              <div class="feature"><div class="feature-icon">↗</div><div><h3>Be Job Ready</h3><p>{feature_card_content["job_readiness"] if st.session_state.analysis_complete and results_are_current else "Get ready to take the next step in your search."}</p></div></div>
             </div>
             """,
             unsafe_allow_html=True,
