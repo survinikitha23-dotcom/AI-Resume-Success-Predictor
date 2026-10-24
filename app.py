@@ -10,97 +10,17 @@ from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from resume_scoring import (
+    GENERIC_JOB_TERMS,
+    _is_recognized_skill_fragment,
+    _keyword_is_present,
+    _recognized_job_skills,
+    _skill_key,
+    calculate_keyword_match,
+)
+
 
 load_dotenv()
-
-
-GENERIC_JOB_TERMS = {
-    "ability", "candidate", "candidates", "developer", "developers", "engineer",
-    "engineers", "experience", "experienced", "job", "knowledge", "manager", "managers",
-    "position", "positions", "preferred", "professional", "qualification", "qualifications",
-    "requirement", "requirements", "responsibilities", "responsibility", "role", "roles",
-    "skill", "skills", "strong", "team", "teams", "work", "working", "year", "years",
-    "basic", "entry", "fresher", "junior", "level", "senior",
-}
-
-
-def _normalize_keyword(text):
-    return " ".join(re.findall(r"[a-z0-9+#]+", text.lower()))
-
-
-def _contains_phrase(text, phrase):
-    normalized_text = f" {_normalize_keyword(text)} "
-    normalized_phrase = f" {_normalize_keyword(phrase)} "
-    return normalized_phrase in normalized_text
-
-
-def _skill_key(term):
-    normalized = _normalize_keyword(term)
-    if normalized in {"java", "core java"}:
-        return "java"
-    if normalized in {"sql", "mysql"}:
-        return normalized
-    if normalized in {
-        "oop",
-        "object oriented programming",
-        "object oriented programming oop",
-    }:
-        return "oop"
-    if normalized == "javascript":
-        return "javascript"
-    return normalized
-
-
-def _keyword_is_present(keyword, text):
-    key = _skill_key(keyword)
-    if key == "java":
-        return _contains_phrase(text, "java")
-    if key == "sql":
-        return _contains_phrase(text, "sql") or _contains_phrase(text, "mysql")
-    if key == "mysql":
-        return _contains_phrase(text, "mysql")
-    if key == "oop":
-        return _contains_phrase(text, "oop") or _contains_phrase(
-            text, "object oriented programming"
-        )
-    if key == "javascript":
-        return _contains_phrase(text, "javascript")
-    return _contains_phrase(text, keyword)
-
-
-def _recognized_job_skills(job_description):
-    recognized = []
-
-    def add_skill(key, label, phrase):
-        if _contains_phrase(job_description, phrase) and all(
-            existing_key != key for existing_key, _ in recognized
-        ):
-            recognized.append((key, label))
-
-    add_skill("java", "Core Java", "core java")
-    add_skill("java", "Java", "java")
-    add_skill("mysql", "MySQL", "mysql")
-    add_skill("sql", "SQL", "sql")
-    add_skill(
-        "oop",
-        "Object-Oriented Programming (OOP)",
-        "object oriented programming",
-    )
-    add_skill("oop", "OOP", "oop")
-    add_skill("javascript", "JavaScript", "javascript")
-    return recognized
-
-
-def _is_recognized_skill_fragment(term, recognized_skills):
-    normalized_term = _normalize_keyword(term)
-    term_words = set(normalized_term.split())
-    for key, label in recognized_skills:
-        if _skill_key(term) == key:
-            return True
-        skill_words = set(_normalize_keyword(label).split())
-        if term_words and term_words.issubset(skill_words):
-            return True
-    return False
 
 
 def calculate_resume_match(resume_text, job_description):
@@ -145,62 +65,16 @@ def calculate_resume_match(resume_text, job_description):
 
 
 def generate_local_resume_feedback(resume_text, job_description):
-    documents = [resume_text.strip(), job_description.strip()]
-    vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 1))
-    try:
-        document_vectors = vectorizer.fit_transform(documents)
-    except ValueError:
-        return {
-            "relevant_skills_found": [],
-            "possibly_missing_skills": [],
-            "improvement_suggestions": [
-                "Add specific skills or responsibilities to the job description "
-                "to enable a keyword comparison.",
-                "Tailor your summary and experience bullets to the role using only "
-                "information that accurately reflects your background.",
-            ],
-        }
-    terms = vectorizer.get_feature_names_out()
-    job_weights = document_vectors[1].toarray().ravel()
-    resume_lower = documents[0].lower()
-    ranked_terms = sorted(
-        range(len(terms)),
-        key=lambda index: (" " not in terms[index], -job_weights[index]),
-    )
-
-    matching_terms = []
-    missing_terms = []
-    recognized_skills = _recognized_job_skills(job_description)
-    for key, label in recognized_skills:
-        destination = (
-            matching_terms
-            if _keyword_is_present(label, resume_lower)
-            else missing_terms
-        )
-        destination.append(label)
-
-    for index in ranked_terms:
-        term = terms[index]
-        if job_weights[index] == 0:
-            continue
-        term_words = term.split()
-        if any(word in GENERIC_JOB_TERMS or word == "required" for word in term_words):
-            continue
-        if _is_recognized_skill_fragment(term, recognized_skills):
-            continue
-        if any(set(term_words).issubset(existing.split()) for existing in matching_terms):
-            continue
-        if any(set(term_words).issubset(existing.split()) for existing in missing_terms):
-            continue
-        destination = (
-            matching_terms
-            if _keyword_is_present(term, resume_lower)
-            else missing_terms
-        )
-        if len(destination) < 12:
-            destination.append(term.title())
+    keyword_match = calculate_keyword_match(resume_text, job_description)
+    matching_terms = keyword_match["matched_skills"]
+    missing_terms = keyword_match["missing_skills"]
 
     suggestions = []
+    if not keyword_match["detected_skills"]:
+        suggestions.append(
+            "No relevant skills or keywords were detected in the job description. "
+            "Add specific requirements to enable a keyword comparison."
+        )
     if missing_terms:
         suggestions.append(
             "If accurate, include evidence for these job-description keywords: "
@@ -229,6 +103,8 @@ def generate_local_resume_feedback(resume_text, job_description):
     return {
         "relevant_skills_found": matching_terms,
         "possibly_missing_skills": missing_terms,
+        "detected_job_skills": keyword_match["detected_skills"],
+        "keyword_match_percentage": keyword_match["percentage"],
         "improvement_suggestions": suggestions,
     }
 
@@ -284,44 +160,63 @@ def assess_ats_compatibility(resume_text):
     return {"passed": passed, "warnings": warnings}
 
 
-def _safe_card_items(items, empty_text="None identified."):
+def _safe_card_badges(items, badge_class, empty_text="None identified."):
     if not items:
-        return html.escape(empty_text)
-    return ", ".join(html.escape(item) for item in items)
-
-
-def _safe_card_lines(lines):
-    return "<br>".join(
-        f"<strong>{html.escape(label)}:</strong> {value}"
-        for label, value in lines
+        return f'<span class="card-empty">{html.escape(empty_text)}</span>'
+    badges = "".join(
+        f'<span class="skill-badge skill-badge--{badge_class}">'
+        f"{html.escape(item)}</span>"
+        for item in items
     )
+    return f'<div class="badge-list">{badges}</div>'
+
+
+def _safe_card_list(items, empty_text="No recommendations available."):
+    if not items:
+        return f'<p class="card-empty">{html.escape(empty_text)}</p>'
+    return "<ul class=\"card-list\">" + "".join(
+        f"<li>{html.escape(item)}</li>" for item in items
+    ) + "</ul>"
 
 
 def build_feature_card_content(keyword_feedback, feedback, ats_report, feedback_source):
-    matching = list(dict.fromkeys(keyword_feedback["relevant_skills_found"]))
-    missing = list(dict.fromkeys(keyword_feedback["possibly_missing_skills"]))
-    matching_keys = {_skill_key(term) for term in matching}
-    missing = [term for term in missing if _skill_key(term) not in matching_keys]
-    keyword_count = len(matching) + len(missing)
-    if keyword_count:
-        score = round(len(matching) / keyword_count * 100)
-        score_text = (
-            f"{score}% ({len(matching)} of {keyword_count} identified job keywords found)"
-        )
-    else:
-        score_text = "Not enough recognizable job keywords to calculate a score."
-
-    skill_card = _safe_card_lines(
-        [
-            ("Score", html.escape(score_text)),
-            ("Matched skills/keywords", _safe_card_items(matching)),
-            ("Not found in resume text", _safe_card_items(missing)),
-            (
-                "Calculation",
-                "Matched keywords divided by identified job keywords; this is not "
-                "a probability of getting hired.",
-            ),
-        ]
+    detected = list(dict.fromkeys(keyword_feedback["detected_job_skills"]))
+    matching_keys = {
+        _skill_key(term) for term in keyword_feedback["relevant_skills_found"]
+    }
+    matching = [
+        term for term in detected if _skill_key(term) in matching_keys
+    ]
+    missing = [
+        term for term in detected if _skill_key(term) not in matching_keys
+    ]
+    keyword_count = len(detected)
+    score = keyword_feedback["keyword_match_percentage"]
+    score_label = f"{score:g}%" if score is not None else "N/A"
+    score_detail = (
+        f"{len(matching)} of {keyword_count} identified job-description "
+        "skills/keywords found."
+        if keyword_count
+        else "No relevant skills or keywords were detected in the job description; "
+        "a keyword match percentage is unavailable."
+    )
+    skill_card = (
+        '<div class="score-overview">'
+        f'<div class="score-ring" style="--score: {score or 0}%;" role="img" '
+        f'aria-label="Keyword match score: {score_label}">'
+        f'<span class="score-ring-value">{score_label}</span></div>'
+        '<div class="score-copy"><span class="card-eyebrow">KEYWORD MATCH</span>'
+        f'<strong>{html.escape(score_detail)}</strong>'
+        '<span class="card-note">This is a keyword comparison, not a probability '
+        'of getting hired. Text similarity (TF-IDF cosine) is shown above.</span>'
+        '</div></div>'
+        '<div class="card-section"><strong class="card-section-title">'
+        'Matched skills and keywords</strong>'
+        f'{_safe_card_badges(matching, "matched")}</div>'
+        '<div class="card-section"><strong class="card-section-title">'
+        'Missing from resume text</strong>'
+        f'{_safe_card_badges(missing, "missing", "No missing keywords identified.")}'
+        '</div>'
     )
 
     if feedback_source == "gemini":
@@ -332,27 +227,21 @@ def build_feature_card_content(keyword_feedback, feedback, ats_report, feedback_
     else:
         source_label = "Local keyword-based feedback (Gemini unavailable)"
         suggestions = keyword_feedback["improvement_suggestions"]
-    suggestion_html = "<br>".join(html.escape(item) for item in suggestions)
-    if not suggestion_html:
-        suggestion_html = "No additional suggestions were identified."
-    improvement_card = _safe_card_lines(
-        [
-            ("Feedback source", source_label),
-            ("Recommendations", suggestion_html),
-        ]
+    improvement_card = (
+        f'<span class="source-badge">{html.escape(source_label)}</span>'
+        f'{_safe_card_list(suggestions, "No additional suggestions were identified.")}'
     )
 
     ats_report = ats_report or {"passed": [], "warnings": []}
-    ats_card = _safe_card_lines(
-        [
-            ("Passed", _safe_card_items(ats_report["passed"], "No checks passed.")),
-            ("Warnings / fixes", _safe_card_items(ats_report["warnings"], "No warnings.")),
-            (
-                "Note",
-                "These are basic text checks, not a real ATS simulation or an "
-                "acceptance guarantee.",
-            ),
-        ]
+    ats_card = (
+        '<div class="card-section"><strong class="card-section-title">'
+        'Checks passed</strong>'
+        f'{_safe_card_badges(ats_report["passed"], "passed", "No checks passed.")}'
+        '</div><div class="card-section"><strong class="card-section-title">'
+        'Warnings and fixes</strong>'
+        f'{_safe_card_badges(ats_report["warnings"], "warning", "No warnings.")}'
+        '</div><p class="card-note">Basic text checks only — not a real ATS '
+        'simulation or an acceptance guarantee.</p>'
     )
 
     next_actions = []
@@ -375,13 +264,17 @@ def build_feature_card_content(keyword_feedback, feedback, ats_report, feedback_
             "keywords and verified outcomes.",
         ]
     )
-    readiness_card = _safe_card_lines(
-        [
-            ("Strengths", _safe_card_items(matching)),
-            ("Important gaps", _safe_card_items(missing)),
-            ("Next actions", "<br>".join(html.escape(item) for item in next_actions[:3])),
-            ("Guidance", "This checklist is guidance, not a guarantee of employment."),
-        ]
+    readiness_card = (
+        '<div class="card-section"><strong class="card-section-title">'
+        'Strengths</strong>'
+        f'{_safe_card_badges(matching, "strength")}</div>'
+        '<div class="card-section"><strong class="card-section-title">'
+        'Important gaps</strong>'
+        f'{_safe_card_badges(missing, "gap", "No specific gaps identified.")}</div>'
+        '<div class="card-section"><strong class="card-section-title">'
+        'Next actions</strong>'
+        f'{_safe_card_list(next_actions[:3])}</div>'
+        '<p class="card-note">Guidance only — not a guarantee of employment.</p>'
     )
 
     return {
@@ -390,6 +283,13 @@ def build_feature_card_content(keyword_feedback, feedback, ats_report, feedback_
         "ats_compatibility": ats_card,
         "job_readiness": readiness_card,
     }
+
+
+def _toggle_result_card(card_id):
+    if st.session_state.active_result_card == card_id:
+        st.session_state.active_result_card = None
+    else:
+        st.session_state.active_result_card = card_id
 
 
 def _safe_gemini_error_diagnostic(error):
@@ -486,7 +386,7 @@ JOB DESCRIPTION:
     for attempt in range(2):
         try:
             response = client.models.generate_content(
-                model="gemini-3.8-flash",
+                model="gemini-3.5-flash-lite",
                 contents=prompt,
                 config=genai.types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -547,30 +447,32 @@ st.markdown(
         --border: #e5ebf3;
     }
 
-    html, body, [class*="css"] {
+    .stApp {
         font-family: 'DM Sans', sans-serif;
         color: var(--ink);
-    }
-
-    .stApp {
         background: linear-gradient(145deg, #e7f2ff 0%, #f4f8ff 35%, #ffffff 78%);
     }
 
-    .block-container {
-        max-width: 100%;
-        padding: 3rem 2rem 1.5rem;
+    .stApp .block-container {
+        max-width: 2048px;
+        width: 100%;
+        margin-left: auto;
+        margin-right: auto;
+        padding: 1.5rem clamp(1.1rem, 2.4vw, 2.5rem) 1.25rem;
     }
 
     header[data-testid="stHeader"] { background: transparent; }
+    .stApp [data-testid="stHorizontalBlock"] { min-width: 0; }
+    .stApp [data-testid="column"] { min-width: 0; }
 
-    .hero { margin: 0 auto 2.1rem; text-align: center; }
+    .hero { margin: 0 auto 1.25rem; text-align: center; }
     .hero h1 {
         color: var(--ink);
         font-family: 'Manrope', sans-serif;
         font-size: clamp(2.2rem, 4vw, 3.25rem);
         line-height: 1.12;
         font-weight: 800;
-        margin: 0 0 .8rem;
+        margin: 0 0 .55rem;
     }
     .hero p {
         color: #63738e;
@@ -583,7 +485,7 @@ st.markdown(
         border: 1px solid var(--border);
         border-radius: 18px;
         box-shadow: 0 14px 42px rgba(35, 69, 115, .08);
-        padding: 1.45rem 1.55rem;
+        padding: 1.2rem 1.3rem;
     }
 
     .section-label {
@@ -592,9 +494,9 @@ st.markdown(
         gap: .7rem;
         color: var(--ink);
         font-family: 'Manrope', sans-serif;
-        font-size: 1.02rem;
+        font-size: 1.1rem;
         font-weight: 700;
-        margin: .1rem 0 .8rem;
+        margin: .1rem 0 .65rem;
     }
     .step-number {
         width: 28px;
@@ -610,8 +512,9 @@ st.markdown(
     }
     .field-hint {
         color: var(--muted);
-        font-size: .88rem;
-        margin: -.35rem 0 .7rem 2.4rem;
+        font-size: 1rem;
+        line-height: 1.5;
+        margin: -.3rem 0 .8rem 2.4rem;
     }
 
     [data-testid="stFileUploader"] section {
@@ -625,14 +528,21 @@ st.markdown(
         border-radius: 8px;
         color: #40516d;
         background: #fff;
+        font-size: .95rem;
+    }
+    [data-testid="stFileUploader"] section,
+    [data-testid="stFileUploader"] small {
+        font-size: .95rem;
+        line-height: 1.5;
     }
     [data-testid="stTextArea"] textarea {
-        min-height: 220px;
+        min-height: 300px;
         border: 1px solid #dce4ef;
         border-radius: 11px;
         background: #fbfcff;
         color: var(--ink);
-        font-size: .94rem;
+        font-size: 1rem;
+        line-height: 1.6;
     }
     [data-testid="stTextArea"] textarea:focus {
         border-color: #9a88f0;
@@ -654,6 +564,12 @@ st.markdown(
         box-shadow: 0 10px 20px rgba(105, 72, 215, .26);
         background: linear-gradient(100deg, #6d4cdd, #5e3dcc);
         color: white;
+    }
+    .stButton > button[kind="primary"]:focus-visible,
+    [data-testid="stFileUploader"] button:focus-visible,
+    [data-testid="stTextArea"] textarea:focus-visible {
+        outline: 3px solid #33228f;
+        outline-offset: 3px;
     }
 
     .results-heading {
@@ -695,45 +611,239 @@ st.markdown(
         max-width: 100%;
         text-align: left;
         color: #7a879b;
-        font-size: .9rem;
-        line-height: 1.55;
+        font-size: 1rem;
+        line-height: 1.65;
         margin: 0;
+        overflow-wrap: anywhere;
     }
     .feature-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: .8rem;
+        gap: 1.1rem;
     }
     .feature {
-        min-height: 106px;
+        --card-accent: #7054d8;
+        --card-tint: #f7f4ff;
+        min-width: 0;
+        padding: 1.25rem;
+        border: 1px solid color-mix(in srgb, var(--card-accent) 20%, #e8edf4);
+        border-radius: 16px;
+        background: linear-gradient(145deg, #fff, var(--card-tint));
+        box-shadow: 0 8px 22px rgba(35, 69, 115, .055);
+        transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+    }
+    .feature:hover {
+        transform: translateY(-2px);
+        border-color: color-mix(in srgb, var(--card-accent) 42%, #e8edf4);
+        box-shadow: 0 12px 26px rgba(35, 69, 115, .1);
+    }
+    .feature--skills { --card-accent: #7054d8; --card-tint: #f7f4ff; }
+    .feature--suggestions { --card-accent: #118477; --card-tint: #f0faf7; }
+    .feature--ats { --card-accent: #3878bd; --card-tint: #f1f7ff; }
+    .feature--readiness { --card-accent: #c07c24; --card-tint: #fff8ed; }
+    .st-key-result_card_skills { --card-accent: #7054d8; --card-tint: #f7f4ff; }
+    .st-key-result_card_suggestions { --card-accent: #118477; --card-tint: #f0faf7; }
+    .st-key-result_card_ats { --card-accent: #3878bd; --card-tint: #f1f7ff; }
+    .st-key-result_card_readiness { --card-accent: #c07c24; --card-tint: #fff8ed; }
+    .st-key-result_card_skills,
+    .st-key-result_card_suggestions,
+    .st-key-result_card_ats,
+    .st-key-result_card_readiness {
+        width: 100%;
+        min-width: 0;
+    }
+    .st-key-result_card_skills [data-testid="stButton"] > button,
+    .st-key-result_card_suggestions [data-testid="stButton"] > button,
+    .st-key-result_card_ats [data-testid="stButton"] > button,
+    .st-key-result_card_readiness [data-testid="stButton"] > button {
+        width: 100%;
+        min-height: 118px;
+        min-width: 0;
+        box-sizing: border-box;
+        border: 1px solid color-mix(in srgb, var(--card-accent) 28%, #e8edf4);
+        border-radius: 16px;
+        background: linear-gradient(145deg, #fff, var(--card-tint));
+        color: #253651;
+        padding: 1.25rem;
+        text-align: left;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        font-size: 1.08rem;
+        line-height: 1.6;
+        box-shadow: 0 8px 22px rgba(35, 69, 115, .055);
+        transition: border-color .16s ease, box-shadow .16s ease;
+    }
+    .st-key-result_card_skills [data-testid="stButton"] > button:hover,
+    .st-key-result_card_suggestions [data-testid="stButton"] > button:hover,
+    .st-key-result_card_ats [data-testid="stButton"] > button:hover,
+    .st-key-result_card_readiness [data-testid="stButton"] > button:hover {
+        border-color: color-mix(in srgb, var(--card-accent) 52%, #e8edf4);
+        box-shadow: 0 12px 26px rgba(35, 69, 115, .1);
+        background: linear-gradient(145deg, #fff, var(--card-tint));
+        color: #253651;
+    }
+    .st-key-result_card_skills [data-testid="stButton"] > button:focus-visible,
+    .st-key-result_card_suggestions [data-testid="stButton"] > button:focus-visible,
+    .st-key-result_card_ats [data-testid="stButton"] > button:focus-visible,
+    .st-key-result_card_readiness [data-testid="stButton"] > button:focus-visible {
+        outline: 3px solid var(--card-accent);
+        outline-offset: 3px;
+    }
+    .st-key-result_details_skills,
+    .st-key-result_details_suggestions,
+    .st-key-result_details_ats,
+    .st-key-result_details_readiness {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        padding: 1.25rem;
+        border: 1px solid color-mix(in srgb, var(--card-accent) 24%, #e8edf4);
+        border-radius: 14px;
+        background: linear-gradient(145deg, #fff, var(--card-tint));
+        overflow-wrap: anywhere;
+    }
+    .st-key-result_details_skills { --card-accent: #7054d8; --card-tint: #f7f4ff; }
+    .st-key-result_details_suggestions { --card-accent: #118477; --card-tint: #f0faf7; }
+    .st-key-result_details_ats { --card-accent: #3878bd; --card-tint: #f1f7ff; }
+    .st-key-result_details_readiness { --card-accent: #c07c24; --card-tint: #fff8ed; }
+    .feature-header {
         display: flex;
-        align-items: flex-start;
-        gap: .8rem;
-        padding: 1rem;
-        border: 1px solid #e8edf4;
-        border-radius: 12px;
-        background: #fff;
+        align-items: center;
+        gap: .9rem;
+        margin-bottom: 1.15rem;
+    }
+    .feature-heading { min-width: 0; }
+    .feature-kicker, .card-eyebrow {
+        display: block;
+        color: var(--card-accent);
+        font-size: .78rem;
+        font-weight: 700;
+        letter-spacing: .09em;
+        line-height: 1.5;
     }
     .feature-icon {
         display: grid;
         place-items: center;
-        width: 36px;
-        height: 36px;
-        flex: 0 0 36px;
-        border-radius: 10px;
-        color: #6651cb;
-        background: #f0edff;
-        font-size: 1.05rem;
+        width: 40px;
+        height: 40px;
+        flex: 0 0 40px;
+        border-radius: 12px;
+        color: var(--card-accent);
+        background: color-mix(in srgb, var(--card-accent) 11%, white);
+        font-size: 1.1rem;
     }
-    .feature:nth-child(2) .feature-icon { color: #168477; background: #e7f7f3; }
-    .feature:nth-child(3) .feature-icon { color: #3878bd; background: #eaf4ff; }
-    .feature:nth-child(4) .feature-icon { color: #c07c24; background: #fff4e4; }
     .feature h3 {
         color: #253651;
-        font: 700 .91rem 'Manrope', sans-serif;
-        margin: .1rem 0 .3rem;
+        font: 700 1.1rem 'Manrope', sans-serif;
+        margin: .18rem 0 0;
     }
-    .feature p { color: #7a879b; font-size: .81rem; line-height: 1.45; margin: 0; }
+    .feature-content {
+        width: 100%;
+        max-width: none;
+        min-width: 0;
+        color: #495a73;
+        font-size: 1rem;
+        line-height: 1.7;
+        overflow-wrap: anywhere;
+    }
+    .score-overview {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+        gap: 1rem;
+        margin-bottom: 1.2rem;
+    }
+    .score-ring {
+        position: relative;
+        display: grid;
+        place-items: center;
+        width: 104px;
+        height: 104px;
+        flex: 0 0 104px;
+        border-radius: 50%;
+        background: conic-gradient(var(--card-accent) var(--score), #e8edf5 0);
+    }
+    .score-ring::before {
+        position: absolute;
+        inset: 9px;
+        border-radius: 50%;
+        background: #fff;
+        content: "";
+    }
+    .score-ring-value {
+        position: relative;
+        color: #253651;
+        font: 800 1.35rem 'Manrope', sans-serif;
+    }
+    .score-copy { display: grid; min-width: 0; gap: .4rem; }
+    .score-copy strong { color: #253651; font-size: 1rem; line-height: 1.55; }
+    .card-section { margin-top: 1.1rem; }
+    .card-section-title {
+        display: block;
+        color: #34445f;
+        font-size: .95rem;
+        line-height: 1.5;
+        margin-bottom: .55rem;
+    }
+    .badge-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: .4rem;
+    }
+    .skill-badge, .source-badge {
+        display: inline-flex;
+        max-width: 100%;
+        min-width: 0;
+        padding: .36rem .68rem;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        font-size: .9rem;
+        font-weight: 600;
+        line-height: 1.55;
+        overflow-wrap: anywhere;
+        white-space: normal;
+    }
+    .skill-badge--matched, .skill-badge--strength, .skill-badge--passed {
+        color: #126a5e;
+        border-color: #c7e9df;
+        background: #e9f8f3;
+    }
+    .skill-badge--missing, .skill-badge--gap {
+        color: #a3443d;
+        border-color: #f0d2cc;
+        background: #fff1ee;
+    }
+    .skill-badge--warning {
+        color: #965c12;
+        border-color: #f1dfb9;
+        background: #fff6e5;
+    }
+    .source-badge {
+        color: #11685f;
+        border-color: #c7e9df;
+        background: #e9f8f3;
+    }
+    .card-list {
+        display: grid;
+        gap: .75rem;
+        margin: .45rem 0 0;
+        padding-left: 1.1rem;
+        line-height: 1.65;
+    }
+    .card-list li {
+        min-width: 0;
+        padding-left: .12rem;
+        overflow-wrap: anywhere;
+    }
+    .card-empty, .card-note {
+        display: block;
+        color: #71809a;
+        font-size: .9rem;
+        line-height: 1.65;
+        margin: .75rem 0 0;
+    }
+    .card-empty { margin-top: .1rem; }
+
     .footer {
         text-align: center;
         color: #8793a6;
@@ -742,11 +852,20 @@ st.markdown(
     }
 
     @media (max-width: 760px) {
-        .block-container { padding: 2rem 1rem 1rem; }
-        .hero { margin-bottom: 1.5rem; }
+        .block-container { padding: 1.25rem .9rem 1rem; }
+        .stApp [data-testid="stHorizontalBlock"] {
+            flex-direction: column;
+        }
+        .stApp [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+        .hero { margin-bottom: 1rem; }
         .hero p { font-size: .98rem; }
         [data-testid="stVerticalBlockBorderWrapper"] { padding: 1.15rem; }
         .feature-grid { grid-template-columns: 1fr; }
+        .score-overview { align-items: flex-start; }
+        .score-ring { width: 88px; height: 88px; flex-basis: 88px; }
         .empty-state { min-height: 200px; }
     }
     </style>
@@ -764,7 +883,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-input_column, results_column = st.columns([0.9, 1.25], gap="large")
+input_column, results_column = st.columns([1, 1.2], gap="medium")
 
 if "resume_text" not in st.session_state:
     st.session_state.resume_text = ""
@@ -790,6 +909,8 @@ if "analysis_resume_text" not in st.session_state:
     st.session_state.analysis_resume_text = None
 if "analysis_job_description" not in st.session_state:
     st.session_state.analysis_job_description = None
+if "active_result_card" not in st.session_state:
+    st.session_state.active_result_card = None
 
 with input_column:
     with st.container(border=True):
@@ -840,11 +961,12 @@ with input_column:
         job_description = st.text_area(
             "Job description",
             placeholder="Paste the job description here...",
-            height=220,
+            height=300,
             label_visibility="collapsed",
         )
         analyze_clicked = st.button("Analyze Resume", type="primary", use_container_width=True)
         if analyze_clicked:
+            st.session_state.active_result_card = None
             st.session_state.analysis_resume_text = st.session_state.resume_text
             st.session_state.analysis_job_description = job_description
             st.session_state.match_result = None
@@ -916,34 +1038,25 @@ with results_column:
         )
         if st.session_state.analysis_complete and results_are_current:
             if st.session_state.match_result is not None:
-                similarity_percentage, matching_terms = st.session_state.match_result
+                similarity_percentage, _ = st.session_state.match_result
                 similarity_text = (
                     f"<strong>Text similarity (TF-IDF cosine):</strong> "
                     f"{similarity_percentage}% — weighted word/phrase overlap, "
                     "not a job-success probability."
-                )
-                matching_terms_text = (
-                    ", ".join(html.escape(term) for term in matching_terms)
-                    if matching_terms
-                    else "No matching job-description terms were found in the resume text."
                 )
             else:
                 similarity_text = html.escape(
                     st.session_state.match_error
                     or "Text similarity could not be calculated."
                 )
-                matching_terms_text = "Keyword results are shown in the Skill Match Score card."
             feature_card_content = build_feature_card_content(
                 st.session_state.keyword_feedback,
                 st.session_state.gemini_feedback,
                 st.session_state.ats_report,
                 st.session_state.feedback_source,
             )
-            result_title = "Resume Feedback"
-            result_description = [
-                similarity_text,
-                f"<strong>Matching terms:</strong> {matching_terms_text}",
-            ]
+            result_title = "Resume Analysis Complete"
+            result_description = [similarity_text]
             if st.session_state.gemini_feedback:
                 feedback_source = (
                     "Gemini-generated suggestions; keyword and ATS checks are local"
@@ -953,31 +1066,11 @@ with results_column:
                 result_description.append(
                     f"<strong>Feedback source:</strong> {feedback_source}"
                 )
-                feedback_sections = (
-                    ("Relevant skills found in resume", "relevant_skills_found"),
-                    ("Possibly missing from resume text", "possibly_missing_skills"),
-                    ("Resume improvement suggestions", "improvement_suggestions"),
-                )
-                for section_title, section_key in feedback_sections:
-                    feedback_items = st.session_state.gemini_feedback[section_key]
-                    separator = (
-                        "<br><br>"
-                        if section_key == "improvement_suggestions"
-                        else ", "
-                    )
-                    safe_items = separator.join(
-                        html.escape(item) for item in feedback_items
-                    )
-                    if not safe_items:
-                        safe_items = "None identified."
-                    result_description.append(
-                        f"<strong>{section_title}:</strong> {safe_items}"
-                    )
-                result_description.append(
-                    "<em>Suggested missing skills are not verified as absent; they were not found in the provided resume text.</em>"
-                )
             elif st.session_state.gemini_error:
                 result_description.append(html.escape(st.session_state.gemini_error))
+            result_description.append(
+                "Select a result card below to inspect its detailed findings."
+            )
             result_description = "<br><br>".join(result_description)
         elif results_are_current and st.session_state.match_error:
             result_title = "Unable to compare yet"
@@ -993,14 +1086,86 @@ with results_column:
               <h3>{result_title}</h3>
               <p>{result_description}</p>
             </div>
-            <div class="feature-grid">
-              <div class="feature"><div class="feature-icon">◉</div><div><h3>Skill Match Score</h3><p>{feature_card_content["skill_match"] if st.session_state.analysis_complete and results_are_current else "See how your skills align with the role."}</p></div></div>
-              <div class="feature"><div class="feature-icon">✎</div><div><h3>Improvement Suggestions</h3><p>{feature_card_content["improvement_suggestions"] if st.session_state.analysis_complete and results_are_current else "Find opportunities to strengthen your resume."}</p></div></div>
-              <div class="feature"><div class="feature-icon">✓</div><div><h3>ATS Compatibility</h3><p>{feature_card_content["ats_compatibility"] if st.session_state.analysis_complete and results_are_current else "Understand how your resume reads for ATS."}</p></div></div>
-              <div class="feature"><div class="feature-icon">↗</div><div><h3>Be Job Ready</h3><p>{feature_card_content["job_readiness"] if st.session_state.analysis_complete and results_are_current else "Get ready to take the next step in your search."}</p></div></div>
-            </div>
             """,
             unsafe_allow_html=True,
         )
+
+        card_rows = (
+            (
+                (
+                    "skill_match",
+                    "Skill Match Score",
+                    "◉",
+                    "View matched and missing skills with the score explanation.",
+                    "skills",
+                ),
+                (
+                    "improvement_suggestions",
+                    "Improvement Suggestions",
+                    "✎",
+                    "View the personalized resume recommendations.",
+                    "suggestions",
+                ),
+            ),
+            (
+                (
+                    "ats_compatibility",
+                    "ATS Compatibility",
+                    "✓",
+                    "View passed checks, warnings, and fixes.",
+                    "ats",
+                ),
+                (
+                    "job_readiness",
+                    "Be Job Ready",
+                    "↗",
+                    "View strengths, gaps, and suggested next actions.",
+                    "readiness",
+                ),
+            ),
+        )
+        for row in card_rows:
+            card_columns = st.columns(2, gap="medium")
+            for column, (card_id, title, icon, description, style_name) in zip(
+                card_columns, row
+            ):
+                with column:
+                    with st.container(key=f"result_card_{style_name}"):
+                        selected = (
+                            st.session_state.active_result_card == card_id
+                        )
+                        st.button(
+                            f"{icon}  **{title}**  \n{description}  \n"
+                            f"{'⌄ Expanded' if selected else '› Expand'}",
+                            use_container_width=True,
+                            key=f"result_toggle_{card_id}",
+                            on_click=_toggle_result_card,
+                            args=(card_id,),
+                        )
+
+        selected_card = next(
+            (
+                card
+                for row in card_rows
+                for card in row
+                if card[0] == st.session_state.active_result_card
+            ),
+            None,
+        )
+        if selected_card is not None:
+            card_id, _, _, _, style_name = selected_card
+            with st.container(key=f"result_details_{style_name}"):
+                if st.session_state.analysis_complete and results_are_current:
+                    st.markdown(
+                        f'<div class="feature-content">'
+                        f'{feature_card_content[card_id]}'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.info(
+                        "Analyze the current resume and job "
+                        "description to view up-to-date details."
+                    )
 
 st.markdown('<div class="footer">Powered by Generative AI &bull; Built with Streamlit</div>', unsafe_allow_html=True)
